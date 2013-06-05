@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, FlexibleContexts, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, FlexibleContexts, RecordWildCards, Rank2Types #-}
 module Database.MongoDB.Queue (
     work
   , emit
@@ -13,11 +13,14 @@ import Control.Applicative (Applicative)
 import Control.Monad.Trans.Control (MonadBaseControl(..))
 import Data.Text (Text)
 import Network.BSD (getHostName, HostName)
+import Control.Monad (void)
 
-queueCollection, handled, dataField, _id :: Text
+queueCollection, handled, dataField, _id, hostField, versionField :: Text
 queueCollection = "queue"
 handled = "handled"
 dataField = "data"
+hostField = "host"
+versionField = "version"
 _id = "_id"
 
 -- from Database.Persist.MongoDB, trying to move into driver
@@ -41,56 +44,58 @@ findAndModifyOne collection objectId updates = do
     where
       findErr result = lookup "err" (at "lastErrorObject" result)
 
-run :: Show a => Action IO a -> IO ()
-run act = do
-  pipe <- runIOE $ connect (host "127.0.0.1")
-  m1 <- access pipe master "mongomq" act
-  print m1
 
-
+type DBRunner = MonadIO m => Action m a -> m a
 data QueueEmitter = QueueEmitter {
                       qeVersion :: Int -- ^ version
                     , qeHost :: HostName -- ^ HostName
+                    , qeRunDB :: DBRunner
                     }
 
-data EmitterOpts = EmitterOpts { version :: Int }
+data EmitterOpts = EmitterOpts { version :: Int, emitRunner :: DBRunner }
 
-createEmitter :: IO QueueEmitter
-createEmitter = mkEmitter $ EmitterOpts { version = 1 }
+createEmitter :: DBRunner -> IO QueueEmitter
+createEmitter runEmitter = mkEmitter $ EmitterOpts {
+                             version = 1,
+                             emitRunner = runEmitter
+                           }
 
 mkEmitter :: EmitterOpts -> IO QueueEmitter
-mkEmitter opts = do
+mkEmitter EmitterOpts {..} = do
   name <- getHostName
-  return $ QueueEmitter (version opts) name 
+  return $ QueueEmitter version name emitRunner
 
 emit :: QueueEmitter -> Document -> IO ()
 emit QueueEmitter {..} doc =
-  run $ insert_ queueCollection [
-            "version" =: qeVersion
+  qeRunDB $ insert_ queueCollection [
+            versionField =: qeVersion
           , dataField =: doc
           , handled =: False
-          , "host" =: qeHost
+          , hostField =: qeHost
           ]
+          -- TODO: add timestamp
+          -- but actually the _id will already have a timestamp
           -- localTime: dt, 
           -- globalTime: new Date(dt-self.serverTimeOffset),
           -- pickedTime: new Date(dt-self.serverTimeOffset),
 
-data QueueWorker = QueueWorker
-data WorkerOpts = WorkerOpts
+data QueueWorker = QueueWorker { qwRunDB :: DBRunner }
+data WorkerOpts = WorkerOpts { workerRunner :: DBRunner }
 
-createWorker :: IO QueueWorker
-createWorker = mkWorker $ WorkerOpts
+createWorker :: DBRunner -> IO QueueWorker
+createWorker runWorker = mkWorker $ WorkerOpts { 
+                         workerRunner = runWorker
+                       }
 
 mkWorker :: WorkerOpts -> IO QueueWorker
-mkWorker _ = do
-  return $ QueueWorker
+mkWorker WorkerOpts {..} = return $ QueueWorker workerRunner
 
 work :: QueueWorker -> (Document -> Action IO ()) -> IO ()
-work QueueWorker {..} handler = run $ do
-  cursor <- find (select [ handled =: False ] queueCollection) { options = [TailableCursor, AwaitData] }
-  tailableCursorApply cursor $ \doc -> do
-    handler (at "data" doc)
-    findAndModifyOne queueCollection (at _id doc) [ handled =: True ]
+work QueueWorker {..} handler = qwRunDB $ do
+    cursor <- find (select [ handled =: False ] queueCollection) { options = [TailableCursor, AwaitData] }
+    void $ tailableCursorApply cursor $ \doc -> do
+      handler (at "data" doc)
+      findAndModifyOne queueCollection (at _id doc) [ handled =: True ]
   where
     tailableCursorApply :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> (Document ->  Action m a) ->  Action m a
     tailableCursorApply cursor f = do
@@ -98,3 +103,12 @@ work QueueWorker {..} handler = run $ do
       case n of
         Nothing -> error "tailable cursor ended"
         (Just x) -> f x >> tailableCursorApply cursor f
+
+
+{- simple runner example
+runDB :: Show a => Action IO a -> IO ()
+runDB act = do
+  pipe <- runIOE $ connect (host "127.0.0.1")
+  m1 <- access pipe master "mongomq" act
+  print m1
+ - -}
