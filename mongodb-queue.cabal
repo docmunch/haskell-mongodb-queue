@@ -26,3 +26,4 @@ library
     , transformers
     , monad-control
     , text
+    , network
