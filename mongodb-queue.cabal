@@ -5,7 +5,7 @@ name:                mongodb-queue
 version:             0.1.0.0
 synopsis:            a queue using MongoDB
 -- description:         
-homepage:            github.com/gregwebs/haskell-mongodb-queue
+homepage:            https://github.com/gregwebs/haskell-mongodb-queue
 license:             MIT
 author:              Greg Weber
 maintainer:          greg@gregweber.info
@@ -19,6 +19,9 @@ library
   exposed-modules:     
     Database.MongoDB.Queue
 
+  extensions:
+    OverloadedStrings
+
   -- other-modules:       
   build-depends:
       base == 4.6.*
@@ -27,3 +30,26 @@ library
     , monad-control
     , text
     , network
+
+test-suite test
+  type: exitcode-stdio-1.0
+  main-is: main.hs
+  hs-source-dirs: test, .
+
+  extensions:
+    OverloadedStrings
+
+  build-depends:
+      base == 4.6.*
+    , mongoDB
+    , transformers
+    , monad-control
+    , text
+    , network
+    , hspec
+
+
+
+source-repository head
+  type: git
+  location: git://github.com/gregwebs/haskell-mongodb-queue.git

@@ -1,7 +1,8 @@
-{-# LANGUAGE OverloadedStrings, FlexibleContexts, RecordWildCards, Rank2Types #-}
+{-# LANGUAGE FlexibleContexts, RecordWildCards, Rank2Types #-}
 module Database.MongoDB.Queue (
     work
   , emit
+  , peek
   , createEmitter
   , createWorker
 ) where
@@ -48,26 +49,34 @@ findAndModifyOne collection objectId updates = do
 type DBRunner = MonadIO m => Action m a -> m a
 data QueueEmitter = QueueEmitter {
                       qeVersion :: Int -- ^ version
-                    , qeHost :: HostName -- ^ HostName
+                    , qeHost :: HostName
                     , qeRunDB :: DBRunner
+                    , qeCollection :: Collection
                     }
 
-data EmitterOpts = EmitterOpts { version :: Int, emitRunner :: DBRunner }
+data EmitterOpts = EmitterOpts {
+                     emitterVersion :: Int
+                   , emitterRunner :: DBRunner
+                   , emitterCollection :: Collection
+                   }
 
+-- | create a QueueEmitter
 createEmitter :: DBRunner -> IO QueueEmitter
 createEmitter runEmitter = mkEmitter $ EmitterOpts {
-                             version = 1,
-                             emitRunner = runEmitter
+                             emitterVersion = 1
+                           , emitterRunner = runEmitter
+                           , emitterCollection = queueCollection
                            }
 
 mkEmitter :: EmitterOpts -> IO QueueEmitter
 mkEmitter EmitterOpts {..} = do
   name <- getHostName
-  return $ QueueEmitter version name emitRunner
+  return $ QueueEmitter emitterVersion name emitterRunner emitterCollection
 
+-- | emit a message for a worker
 emit :: QueueEmitter -> Document -> IO ()
 emit QueueEmitter {..} doc =
-  qeRunDB $ insert_ queueCollection [
+  qeRunDB $ insert_ qeCollection [
             versionField =: qeVersion
           , dataField =: doc
           , handled =: False
@@ -79,36 +88,66 @@ emit QueueEmitter {..} doc =
           -- globalTime: new Date(dt-self.serverTimeOffset),
           -- pickedTime: new Date(dt-self.serverTimeOffset),
 
-data QueueWorker = QueueWorker { qwRunDB :: DBRunner }
-data WorkerOpts = WorkerOpts { workerRunner :: DBRunner }
+data QueueWorker = QueueWorker {
+                     qwRunDB :: DBRunner
+                   , qwCursor :: Cursor
+                   , qwCollection :: Collection
+                   }
+data WorkerOpts = WorkerOpts { 
+                    workerRunner :: DBRunner
+                  , workerMaxByteSize :: Int
+                  , workerCollection :: Collection
+                  }
 
+-- | creates a QueueWorker
+-- Do not 'work' multiple times against the same QueueWorker
 createWorker :: DBRunner -> IO QueueWorker
 createWorker runWorker = mkWorker $ WorkerOpts { 
                          workerRunner = runWorker
+                       , workerMaxByteSize = 100000
+                       , workerCollection = queueCollection
                        }
 
 mkWorker :: WorkerOpts -> IO QueueWorker
-mkWorker WorkerOpts {..} = return $ QueueWorker workerRunner
+mkWorker WorkerOpts {..} = do
+    _<- workerRunner $
+      createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
+    cursor <- getCursor workerRunner workerCollection
+    return $ QueueWorker workerRunner cursor workerCollection
 
+getCursor :: DBRunner -> Collection -> IO Cursor
+getCursor runDB collection =
+    runDB $ find (select [ handled =: False ] collection) {
+        options = [TailableCursor, AwaitData, NoCursorTimeout]
+      }
+
+
+-- | used for testing.
+-- Get the next document, will not mark it as handled
+-- Do not peek/work multiple times against the same QueueWorker
+peek :: QueueWorker -> IO Document
+peek QueueWorker {..} = qwRunDB $ 
+  fmap (at dataField) (nextDoc qwCursor)
+
+nextDoc :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m Document
+nextDoc cursor = do
+  n <- next cursor
+  return $ case n of
+    Nothing -> error "tailable cursor ended"
+    (Just doc) -> doc
+
+-- | Perform the action every time there is a new message.
+-- And then marks the message as handled.
+-- Does not call ForkIO, blocks the program
+--
+-- Do not call this multiple times against the same QueueWorker
 work :: QueueWorker -> (Document -> Action IO ()) -> IO ()
 work QueueWorker {..} handler = qwRunDB $ do
-    cursor <- find (select [ handled =: False ] queueCollection) { options = [TailableCursor, AwaitData] }
-    void $ tailableCursorApply cursor $ \doc -> do
-      handler (at "data" doc)
+    void $ tailableCursorApply qwCursor $ \doc -> do
+      handler (at dataField doc)
       findAndModifyOne queueCollection (at _id doc) [ handled =: True ]
   where
     tailableCursorApply :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> (Document ->  Action m a) ->  Action m a
     tailableCursorApply cursor f = do
-      n <- next cursor
-      case n of
-        Nothing -> error "tailable cursor ended"
-        (Just x) -> f x >> tailableCursorApply cursor f
-
-
-{- simple runner example
-runDB :: Show a => Action IO a -> IO ()
-runDB act = do
-  pipe <- runIOE $ connect (host "127.0.0.1")
-  m1 <- access pipe master "mongomq" act
-  print m1
- - -}
+      x <- nextDoc cursor
+      f x >> tailableCursorApply cursor f
