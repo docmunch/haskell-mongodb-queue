@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleContexts, RecordWildCards, Rank2Types #-}
+{-# LANGUAGE FlexibleContexts, RecordWildCards, Rank2Types, DeriveDataTypeable #-}
 module Database.MongoDB.Queue (
     work
   , emit
@@ -8,8 +8,10 @@ module Database.MongoDB.Queue (
 ) where
 
 import Prelude hiding (lookup)
+import Control.Exception.Base (throwIO, Exception)
+import Data.Typeable (Typeable)
 import Database.MongoDB
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Applicative (Applicative)
 import Control.Monad.Trans.Control (MonadBaseControl(..))
 import Data.Text (Text)
@@ -25,21 +27,26 @@ versionField = "version"
 _id = "_id"
 
 -- from Database.Persist.MongoDB, trying to move into driver
-findAndModifyOne :: (Applicative m, MonadIO m)
-                 => Collection
-                 -> ObjectId -- ^ _id for query
-                 -> [Field] -- ^ updates
-                 -> Action m (Either String Document)
-findAndModifyOne collection objectId updates = do
+findAndModify :: (Applicative m, MonadIO m)
+              => Query
+              -> Document -- ^ updates
+              -> Action m (Either String Document)
+findAndModify (Query {
+    selection = Select sel collection
+  , project = project
+  , sort = sort
+  }) updates = do
   result <- runCommand [
-     "findAndModify" := String collection,
-     "new" := Bool True, -- return updated document, not original document
-     "query" := Doc [_id := ObjId objectId],
-     "update" := Doc updates
+     "findAndModify" := String collection
+   , "new"    := Bool True -- return updated document, not original document
+   , "query"  := Doc sel
+   , "update" := Doc updates
+   , "fields" := Doc project
+   , "sort"   := Doc sort
    ]
   return $ case findErr result of
     Nothing -> case lookup "value" result of
-      Nothing -> Left "no value field"
+      Nothing -> Left "findAndModify: no document found (value field was empty)"
       Just doc -> Right doc
     Just e -> Left e
     where
@@ -132,9 +139,14 @@ peek QueueWorker {..} = qwRunDB $
 nextDoc :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m Document
 nextDoc cursor = do
   n <- next cursor
-  return $ case n of
-    Nothing -> error "tailable cursor ended"
-    (Just doc) -> doc
+  case n of
+    Nothing -> liftIO $ throwIO $ TailableCursorError "tailable cursor ended"
+    (Just doc) -> return doc
+
+data MongoQueueException = FindAndModifyError String
+                         | TailableCursorError String
+                         deriving (Show, Typeable)
+instance Exception MongoQueueException
 
 -- | Perform the action every time there is a new message.
 -- And then marks the message as handled.
@@ -143,9 +155,13 @@ nextDoc cursor = do
 -- Do not call this multiple times against the same QueueWorker
 work :: QueueWorker -> (Document -> Action IO ()) -> IO ()
 work QueueWorker {..} handler = qwRunDB $ do
-    void $ tailableCursorApply qwCursor $ \doc -> do
-      handler (at dataField doc)
-      findAndModifyOne queueCollection (at _id doc) [ handled =: True ]
+    void $ tailableCursorApply qwCursor $ \origDoc -> do
+      eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] queueCollection) {
+          sort = ["$natural" =: (-1 :: Int)]
+        } [ handled =: True ]
+      case eDoc of
+        Left err  -> liftIO $ throwIO $ FindAndModifyError err
+        Right doc -> handler (at dataField doc)
   where
     tailableCursorApply :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> (Document ->  Action m a) ->  Action m a
     tailableCursorApply cursor f = do
