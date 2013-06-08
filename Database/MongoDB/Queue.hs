@@ -1,8 +1,7 @@
 {-# LANGUAGE FlexibleContexts, RecordWildCards, Rank2Types, DeriveDataTypeable #-}
 module Database.MongoDB.Queue (
-    work
-  , emit
-  , peek
+    emit
+  , nextFromQueue
   , createEmitter
   , createWorker
 ) where
@@ -16,7 +15,6 @@ import Control.Applicative (Applicative)
 import Control.Monad.Trans.Control (MonadBaseControl(..))
 import Data.Text (Text)
 import Network.BSD (getHostName, HostName)
-import Control.Monad (void)
 
 queueCollection, handled, dataField, _id, hostField, versionField :: Text
 queueCollection = "queue"
@@ -53,7 +51,7 @@ findAndModify (Query {
       findErr result = lookup "err" (at "lastErrorObject" result)
 
 
-type DBRunner = MonadIO m => Action m a -> m a
+type DBRunner = (MonadIO m, MonadBaseControl IO m) => Action m a -> m a
 data QueueEmitter = QueueEmitter {
                       qeVersion :: Int -- ^ version
                     , qeHost :: HostName
@@ -124,17 +122,12 @@ mkWorker WorkerOpts {..} = do
 
 getCursor :: DBRunner -> Collection -> IO Cursor
 getCursor runDB collection =
-    runDB $ find (select [ handled =: False ] collection) {
+    runDB $ do
+      _<- insert collection [ "tailableCursorFix" =: ("helps when there are no docs" :: Text) ]
+      find (select [ handled =: False ] collection) {
         options = [TailableCursor, AwaitData, NoCursorTimeout]
       }
 
-
--- | used for testing.
--- Get the next document, will not mark it as handled
--- Do not peek/work multiple times against the same QueueWorker
-peek :: QueueWorker -> IO Document
-peek QueueWorker {..} = qwRunDB $ 
-  fmap (at dataField) (nextDoc qwCursor)
 
 nextDoc :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m Document
 nextDoc cursor = do
@@ -148,22 +141,40 @@ data MongoQueueException = FindAndModifyError String
                          deriving (Show, Typeable)
 instance Exception MongoQueueException
 
+-- | Get the next message from the queue.
+-- First marks the message as handled.
+--
+-- Do not call this from multiple threads against the same QueueWorker
+nextFromQueue :: QueueWorker -> IO Document
+nextFromQueue QueueWorker {..} = qwRunDB $ do
+    origDoc <- nextDoc qwCursor {-`catch` (\e ->
+      case e of
+        TailableCursorError "tailable cursor ended" -> do
+          cursor <- getCursor
+        _ -> liftIO $ thowIO e
+      )
+    -}
+    liftIO $ print origDoc
+    eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] queueCollection) {
+        sort = ["$natural" =: (-1 :: Int)]
+      } [ "$set" =: [handled =: True] ]
+    case eDoc of
+      Left err  -> liftIO $ throwIO $ FindAndModifyError err
+      Right doc -> do
+        liftIO $ print doc
+        return (at dataField doc)
+
+{-
 -- | Perform the action every time there is a new message.
 -- And then marks the message as handled.
 -- Does not call ForkIO, blocks the program
 --
 -- Do not call this multiple times against the same QueueWorker
 work :: QueueWorker -> (Document -> Action IO ()) -> IO ()
-work QueueWorker {..} handler = qwRunDB $ do
-    void $ tailableCursorApply qwCursor $ \origDoc -> do
-      eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] queueCollection) {
-          sort = ["$natural" =: (-1 :: Int)]
-        } [ handled =: True ]
-      case eDoc of
-        Left err  -> liftIO $ throwIO $ FindAndModifyError err
-        Right doc -> handler (at dataField doc)
+work qw handler = loop
   where
-    tailableCursorApply :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> (Document ->  Action m a) ->  Action m a
-    tailableCursorApply cursor f = do
-      x <- nextDoc cursor
-      f x >> tailableCursorApply cursor f
+    loop = do
+      doc <- nextFromQueue qw
+      handler doc
+      loop
+      -}
