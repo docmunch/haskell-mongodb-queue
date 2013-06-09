@@ -133,11 +133,10 @@ nextDoc :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m D
 nextDoc cursor = do
   n <- next cursor
   case n of
-    Nothing -> liftIO $ throwIO $ TailableCursorError "tailable cursor ended"
+    Nothing -> nextDoc cursor
     (Just doc) -> return doc
 
 data MongoQueueException = FindAndModifyError String
-                         | TailableCursorError String
                          deriving (Show, Typeable)
 instance Exception MongoQueueException
 
@@ -149,7 +148,7 @@ nextFromQueue :: QueueWorker -> IO Document
 nextFromQueue QueueWorker {..} = qwRunDB $ do
     origDoc <- nextDoc qwCursor {-`catch` (\e ->
       case e of
-        TailableCursorError "tailable cursor ended" -> do
+         dead cursor
           cursor <- getCursor
         _ -> liftIO $ thowIO e
       )
