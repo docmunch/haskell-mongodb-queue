@@ -153,15 +153,12 @@ nextFromQueue QueueWorker {..} = qwRunDB $ do
         _ -> liftIO $ thowIO e
       )
     -}
-    liftIO $ print origDoc
     eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] queueCollection) {
         sort = ["$natural" =: (-1 :: Int)]
       } [ "$set" =: [handled =: True] ]
     case eDoc of
       Left err  -> liftIO $ throwIO $ FindAndModifyError err
-      Right doc -> do
-        liftIO $ print doc
-        return (at dataField doc)
+      Right doc -> return (at dataField doc)
 
 {-
 -- | Perform the action every time there is a new message.
