@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                mongodb-queue
-version:             0.2.0.2
+version:             0.2.1
 synopsis:            a queue using MongoDB
 -- description:         
 homepage:            https://github.com/gregwebs/haskell-mongodb-queue
@@ -40,7 +40,7 @@ test-suite test
     OverloadedStrings
 
   build-depends:
-      base == 4.6.*
+      base > 4.5 && < 5
     , mongoDB
     , transformers
     , monad-control
