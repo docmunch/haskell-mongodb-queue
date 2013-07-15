@@ -2,12 +2,14 @@
 module Database.MongoDB.Queue (
     emit
   , nextFromQueue
-  , createEmitter
-  , createWorker
+  , createEmitter, mkEmitter, EmitterOpts (..)
+  , createWorker, mkWorker, WorkerOpts (..)
+
 ) where
 
 import Prelude hiding (lookup)
 import Control.Exception.Base (throwIO, Exception)
+import Data.Default (Default (..))
 import Data.Typeable (Typeable)
 import Database.MongoDB
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -59,22 +61,20 @@ data QueueEmitter = QueueEmitter {
                     , qeCollection :: Collection
                     }
 
-data EmitterOpts = EmitterOpts {
-                     emitterVersion :: Int
-                   , emitterRunner :: DBRunner
+data EmitterOpts = EmitterOpts
+                   { emitterVersion :: Int
                    , emitterCollection :: Collection
                    }
 
+instance Default EmitterOpts where
+    def = EmitterOpts 1 queueCollection
+
+
 -- | create a QueueEmitter
 createEmitter :: DBRunner -> IO QueueEmitter
-createEmitter runEmitter = mkEmitter $ EmitterOpts {
-                             emitterVersion = 1
-                           , emitterRunner = runEmitter
-                           , emitterCollection = queueCollection
-                           }
-
-mkEmitter :: EmitterOpts -> IO QueueEmitter
-mkEmitter EmitterOpts {..} = do
+createEmitter runEmitter = mkEmitter def runEmitter
+mkEmitter :: EmitterOpts -> DBRunner -> IO QueueEmitter
+mkEmitter EmitterOpts {..} emitterRunner = do
   name <- getHostName
   return $ QueueEmitter emitterVersion name emitterRunner emitterCollection
 
@@ -89,7 +89,7 @@ emit QueueEmitter {..} doc =
           ]
           -- TODO: add timestamp
           -- but actually the _id will already have a timestamp
-          -- localTime: dt, 
+          -- localTime: dt,
           -- globalTime: new Date(dt-self.serverTimeOffset),
           -- pickedTime: new Date(dt-self.serverTimeOffset),
 
@@ -98,23 +98,20 @@ data QueueWorker = QueueWorker {
                    , qwCursor :: Cursor
                    , qwCollection :: Collection
                    }
-data WorkerOpts = WorkerOpts { 
-                    workerRunner :: DBRunner
-                  , workerMaxByteSize :: Int
+data WorkerOpts = WorkerOpts
+                  { workerMaxByteSize :: Int
                   , workerCollection :: Collection
                   }
+instance Default WorkerOpts where
+    def = WorkerOpts 100000 queueCollection
 
 -- | creates a QueueWorker
 -- Do not 'work' multiple times against the same QueueWorker
 createWorker :: DBRunner -> IO QueueWorker
-createWorker runWorker = mkWorker $ WorkerOpts { 
-                         workerRunner = runWorker
-                       , workerMaxByteSize = 100000
-                       , workerCollection = queueCollection
-                       }
+createWorker runWorker = mkWorker def runWorker
 
-mkWorker :: WorkerOpts -> IO QueueWorker
-mkWorker WorkerOpts {..} = do
+mkWorker :: WorkerOpts -> DBRunner -> IO QueueWorker
+mkWorker WorkerOpts {..} workerRunner = do
     _<- workerRunner $
       createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
     cursor <- getCursor workerRunner workerCollection
