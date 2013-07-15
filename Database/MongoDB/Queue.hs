@@ -150,7 +150,7 @@ nextFromQueue QueueWorker {..} = qwRunDB $ do
         _ -> liftIO $ thowIO e
       )
     -}
-    eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] queueCollection) {
+    eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] qwCollection) {
         sort = ["$natural" =: (-1 :: Int)]
       } [ "$set" =: [handled =: True] ]
     case eDoc of
