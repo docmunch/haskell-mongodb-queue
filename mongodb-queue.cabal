@@ -30,6 +30,7 @@ library
     , monad-control
     , text
     , network
+    , data-default
 
 test-suite test
   type: exitcode-stdio-1.0
@@ -47,6 +48,7 @@ test-suite test
     , text
     , network
     , hspec
+    , data-default
 
 
 
