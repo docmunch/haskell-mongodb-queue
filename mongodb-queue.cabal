@@ -25,7 +25,7 @@ library
   -- other-modules:       
   build-depends:
       base > 4.5 && < 5
-    , mongoDB
+    , mongoDB >= 1.4.1 && < 2.0
     , transformers
     , monad-control
     , text
@@ -42,7 +42,7 @@ test-suite test
 
   build-depends:
       base > 4.5 && < 5
-    , mongoDB
+    , mongoDB >= 1.4.1 && < 2.0
     , transformers
     , monad-control
     , text
