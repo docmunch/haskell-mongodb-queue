@@ -26,32 +26,6 @@ hostField = "host"
 versionField = "version"
 _id = "_id"
 
--- from Database.Persist.MongoDB, trying to move into driver
-findAndModify :: (Applicative m, MonadIO m)
-              => Query
-              -> Document -- ^ updates
-              -> Action m (Either String Document)
-findAndModify (Query {
-    selection = Select sel collection
-  , project = project
-  , sort = sort
-  }) updates = do
-  result <- runCommand [
-     "findAndModify" := String collection
-   , "new"    := Bool True -- return updated document, not original document
-   , "query"  := Doc sel
-   , "update" := Doc updates
-   , "fields" := Doc project
-   , "sort"   := Doc sort
-   ]
-  return $ case findErr result of
-    Nothing -> case lookup "value" result of
-      Nothing -> Left "findAndModify: no document found (value field was empty)"
-      Just doc -> Right doc
-    Just e -> Left e
-    where
-      findErr result = lookup "err" (at "lastErrorObject" result)
-
 
 type DBRunner = (MonadIO m, MonadBaseControl IO m) => Action m a -> m a
 data QueueEmitter = QueueEmitter {
