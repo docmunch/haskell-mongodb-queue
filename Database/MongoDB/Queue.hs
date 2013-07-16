@@ -13,10 +13,10 @@ import Data.Default (Default (..))
 import Data.Typeable (Typeable)
 import Database.MongoDB
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Applicative (Applicative)
 import Control.Monad.Trans.Control (MonadBaseControl(..))
 import Data.Text (Text)
 import Network.BSD (getHostName, HostName)
+import Control.Monad (void)
 
 queueCollection, handled, dataField, _id, hostField, versionField :: Text
 queueCollection = "queue"
@@ -64,18 +64,22 @@ data QueueEmitter = QueueEmitter {
 data EmitterOpts = EmitterOpts
                    { emitterVersion :: Int
                    , emitterCollection :: Collection
+                   , emitterMaxByteSize :: Int
                    }
 
 instance Default EmitterOpts where
-    def = EmitterOpts 1 queueCollection
+    def = EmitterOpts 1 queueCollection 100000
 
 
 -- | create a QueueEmitter
 createEmitter :: DBRunner -> IO QueueEmitter
 createEmitter runEmitter = mkEmitter def runEmitter
+
+-- | create an emitter with non-default configuration
 mkEmitter :: EmitterOpts -> DBRunner -> IO QueueEmitter
 mkEmitter EmitterOpts {..} emitterRunner = do
   name <- getHostName
+  void $ emitterRunner $ createCollection [Capped, MaxByteSize emitterMaxByteSize] emitterCollection
   return $ QueueEmitter emitterVersion name emitterRunner emitterCollection
 
 -- | emit a message for a worker
@@ -110,6 +114,7 @@ instance Default WorkerOpts where
 createWorker :: DBRunner -> IO QueueWorker
 createWorker runWorker = mkWorker def runWorker
 
+-- | create an worker with non-default configuration
 mkWorker :: WorkerOpts -> DBRunner -> IO QueueWorker
 mkWorker WorkerOpts {..} workerRunner = do
     _<- workerRunner $

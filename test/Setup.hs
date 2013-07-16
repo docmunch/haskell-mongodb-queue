@@ -15,6 +15,8 @@ withRunDB wantsRunDB = do
 runDB :: MonadIO m => Action m a -> m a
 runDB act = do
   pipe <- liftIO $ runIOE $ connect (host "127.0.0.1")
-  Right res <- access pipe master "test" act
+  res <- access pipe master "test" act
+  case res of
+    Left res -> error $ show res
+    Right ok -> return ok
   -- liftIO $ close pipe
-  return res
