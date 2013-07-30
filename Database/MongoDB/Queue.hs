@@ -8,7 +8,8 @@ module Database.MongoDB.Queue (
 ) where
 
 import Prelude hiding (lookup)
-import Control.Exception.Base (throwIO, Exception)
+import Control.Concurrent (threadDelay)
+import Control.Exception.Lifted (catch, throwIO, Exception, SomeException)
 import Data.Default (Default (..))
 import Data.Typeable (Typeable)
 import Database.MongoDB
@@ -47,7 +48,7 @@ instance Default EmitterOpts where
 
 -- | create a QueueEmitter
 createEmitter :: DBRunner -> IO QueueEmitter
-createEmitter runEmitter = mkEmitter def runEmitter
+createEmitter = mkEmitter def
 
 -- | create an emitter with non-default configuration
 mkEmitter :: EmitterOpts -> DBRunner -> IO QueueEmitter
@@ -73,7 +74,7 @@ emit QueueEmitter {..} doc =
 
 data QueueWorker = QueueWorker {
                      qwRunDB :: DBRunner
-                   , qwCursor :: Cursor
+                   , qwGetCursor :: IO Cursor
                    , qwCollection :: Collection
                    }
 data WorkerOpts = WorkerOpts
@@ -86,23 +87,25 @@ instance Default WorkerOpts where
 -- | creates a QueueWorker
 -- Do not 'work' multiple times against the same QueueWorker
 createWorker :: DBRunner -> IO QueueWorker
-createWorker runWorker = mkWorker def runWorker
+createWorker = mkWorker def
 
 -- | create an worker with non-default configuration
 mkWorker :: WorkerOpts -> DBRunner -> IO QueueWorker
 mkWorker WorkerOpts {..} workerRunner = do
     _<- workerRunner $
       createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
-    cursor <- getCursor workerRunner workerCollection
-    return $ QueueWorker workerRunner cursor workerCollection
+    return $ QueueWorker
+               workerRunner
+               (getCursor workerRunner workerCollection)
+               workerCollection
 
 getCursor :: DBRunner -> Collection -> IO Cursor
 getCursor runDB collection =
     runDB $ do
       _<- insert collection [ "tailableCursorFix" =: ("helps when there are no docs" :: Text) ]
       find (select [ handled =: False ] collection) {
-        options = [TailableCursor, AwaitData, NoCursorTimeout]
-      }
+          options = [TailableCursor, AwaitData, NoCursorTimeout]
+        }
 
 
 nextDoc :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m Document
@@ -121,20 +124,22 @@ instance Exception MongoQueueException
 --
 -- Do not call this from multiple threads against the same QueueWorker
 nextFromQueue :: QueueWorker -> IO Document
-nextFromQueue QueueWorker {..} = qwRunDB $ do
-    origDoc <- nextDoc qwCursor {-`catch` (\e ->
-      case e of
-         dead cursor
-          cursor <- getCursor
-        _ -> liftIO $ thowIO e
+nextFromQueue QueueWorker {..} = do
+    cursor <- qwGetCursor
+    qwRunDB $ do
+        origDoc <- nextDoc cursor `catch` handleDroppedCursor
+
+        eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] qwCollection) {
+            sort = ["$natural" =: (-1 :: Int)]
+          } [ "$set" =: [handled =: True] ]
+        case eDoc of
+          Left err  -> liftIO $ throwIO $ FindAndModifyError err
+          Right doc -> return (at dataField doc)
+  where
+    handleDroppedCursor :: (MonadIO m, MonadBaseControl IO m, Functor m) => SomeException -> Action m Document
+    handleDroppedCursor _ = nextDoc =<< liftIO (
+        threadDelay (1000 * 1000) >> qwGetCursor
       )
-    -}
-    eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] qwCollection) {
-        sort = ["$natural" =: (-1 :: Int)]
-      } [ "$set" =: [handled =: True] ]
-    case eDoc of
-      Left err  -> liftIO $ throwIO $ FindAndModifyError err
-      Right doc -> return (at dataField doc)
 
 {-
 -- | Perform the action every time there is a new message.
