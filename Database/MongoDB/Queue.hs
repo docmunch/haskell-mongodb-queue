@@ -1,4 +1,5 @@
-{-# LANGUAGE FlexibleContexts, RecordWildCards, Rank2Types, DeriveDataTypeable #-}
+{-# LANGUAGE FlexibleContexts, RecordWildCards, Rank2Types, DeriveDataTypeable, ExtendedDefaultRules #-}
+{-# OPTIONS_GHC -fno-warn-type-defaults #-}
 module Database.MongoDB.Queue (
     emit
   , nextFromQueue
@@ -18,6 +19,8 @@ import Control.Monad.Trans.Control (MonadBaseControl(..))
 import Data.Text (Text)
 import Network.BSD (getHostName, HostName)
 import Control.Monad (void)
+
+default (Int)
 
 queueCollection, handled, dataField, _id, hostField, versionField :: Text
 queueCollection = "queue"
@@ -124,18 +127,29 @@ instance Exception MongoQueueException
 --
 -- Do not call this from multiple threads against the same QueueWorker
 nextFromQueue :: QueueWorker -> IO Document
-nextFromQueue QueueWorker {..} = do
-    cursor <- qwGetCursor
-    qwRunDB $ do
-        origDoc <- nextDoc cursor `catch` handleDroppedCursor
-
-        eDoc <- findAndModify (select [_id := (valueAt _id origDoc)] qwCollection) {
-            sort = ["$natural" =: (-1 :: Int)]
-          } [ "$set" =: [handled =: True] ]
-        case eDoc of
-          Left err  -> liftIO $ throwIO $ FindAndModifyError err
-          Right doc -> return (at dataField doc)
+nextFromQueue QueueWorker {..} =
+    qwGetCursor >>= qwRunDB . processNext
   where
+    processNext cursor = do
+        origDoc <- nextDoc cursor `catch` handleDroppedCursor
+        let idQuery = [_id := valueAt _id origDoc]
+
+        eDoc <- findAndModify (selectQuery $ idQuery ++ [handled =: False])
+                             ["$set" =: [handled =: True]]
+        case eDoc of
+          Right doc -> return (at dataField doc)
+          Left err  ->  do
+              -- a different cursor can lock this first by setting handled to True
+              -- verify that this is what happened
+              mDoc <- findOne (selectQuery idQuery)
+              case mDoc of
+                Nothing  -> liftIO $ throwIO $ FindAndModifyError err
+                Just _ -> processNext cursor
+
+    selectQuery query = (select query qwCollection) {
+        sort = ["$natural" =: -1]
+      }
+
     handleDroppedCursor :: (MonadIO m, MonadBaseControl IO m, Functor m) => SomeException -> Action m Document
     handleDroppedCursor _ = nextDoc =<< liftIO (
         threadDelay (1000 * 1000) >> qwGetCursor
