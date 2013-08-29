@@ -88,7 +88,12 @@ instance Default WorkerOpts where
     def = WorkerOpts 100000 queueCollection
 
 -- | creates a QueueWorker
--- Do not 'work' multiple times against the same QueueWorker
+-- create a single QueueWorker per process (per queue collection)
+-- call nextFromQueue with the QueueWorker to get the next message
+--
+-- QueueWorker is probably poorly named now with the direction the library has taken.
+-- To handle multiple messages at once use the setup mentioned above with just 1 QueueWorker.
+-- But immediately hand off messages from nextFromQueue to worker threads (this library does not help you create worker threads)
 createWorker :: DBRunner -> IO QueueWorker
 createWorker = mkWorker def
 
