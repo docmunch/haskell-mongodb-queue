@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                mongodb-queue
-version:             0.2.5.2
+version:             0.2.5.3
 synopsis:            a message queue using MongoDB
 -- description:         
 homepage:            https://github.com/docmunch/haskell-mongodb-queue
@@ -26,7 +26,7 @@ library
   build-depends:
       base > 4.5 && < 5
     , lifted-base
-    , mongoDB >= 1.4.1 && < 1.5
+    , mongoDB >= 1.4.1.1 && < 1.5
     , transformers
     , monad-control
     , text
@@ -44,7 +44,7 @@ test-suite test
   build-depends:
       base > 4.5 && < 5
     , lifted-base
-    , mongoDB >= 1.4.1 && < 1.5
+    , mongoDB >= 1.4.1.1 && < 1.5
     , transformers
     , monad-control
     , text
