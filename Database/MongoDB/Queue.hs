@@ -19,6 +19,7 @@ import Control.Monad.Trans.Control (MonadBaseControl(..))
 import Data.Text (Text)
 import Network.BSD (getHostName, HostName)
 import Control.Monad (void)
+import Control.Applicative
 
 default (Int)
 
@@ -31,11 +32,9 @@ versionField = "version"
 _id = "_id"
 
 
-type DBRunner = (MonadIO m, MonadBaseControl IO m) => Action m a -> m a
 data QueueEmitter = QueueEmitter {
                       qeVersion :: Int -- ^ version
                     , qeHost :: HostName
-                    , qeRunDB :: DBRunner
                     , qeCollection :: Collection
                     }
 
@@ -50,20 +49,20 @@ instance Default EmitterOpts where
 
 
 -- | create a QueueEmitter
-createEmitter :: DBRunner -> IO QueueEmitter
+createEmitter :: (Applicative m, MonadIO m) => Action m QueueEmitter
 createEmitter = mkEmitter def
 
 -- | create an emitter with non-default configuration
-mkEmitter :: EmitterOpts -> DBRunner -> IO QueueEmitter
-mkEmitter EmitterOpts {..} emitterRunner = do
-  name <- getHostName
-  void $ emitterRunner $ createCollection [Capped, MaxByteSize emitterMaxByteSize] emitterCollection
-  return $ QueueEmitter emitterVersion name emitterRunner emitterCollection
+mkEmitter :: (Applicative m, MonadIO m) => EmitterOpts -> Action m QueueEmitter
+mkEmitter EmitterOpts {..} = do
+  name <- liftIO getHostName
+  void $ createCollection [Capped, MaxByteSize emitterMaxByteSize] emitterCollection
+  return $ QueueEmitter emitterVersion name emitterCollection
 
 -- | emit a message for a worker
-emit :: QueueEmitter -> Document -> IO ()
+emit :: (MonadIO m, Applicative m) => QueueEmitter -> Document -> Action m ()
 emit QueueEmitter {..} doc =
-  qeRunDB $ insert_ qeCollection [
+  insert_ qeCollection [
             versionField =: qeVersion
           , dataField =: doc
           , handled =: False
@@ -75,11 +74,7 @@ emit QueueEmitter {..} doc =
           -- globalTime: new Date(dt-self.serverTimeOffset),
           -- pickedTime: new Date(dt-self.serverTimeOffset),
 
-data QueueWorker = QueueWorker {
-                     qwRunDB :: DBRunner
-                   , qwGetCursor :: IO Cursor
-                   , qwCollection :: Collection
-                   }
+data QueueWorker = QueueWorker { qwCollection :: Collection }
 data WorkerOpts = WorkerOpts
                   { workerMaxByteSize :: Int
                   , workerCollection :: Collection
@@ -94,26 +89,21 @@ instance Default WorkerOpts where
 -- QueueWorker is probably poorly named now with the direction the library has taken.
 -- To handle multiple messages at once use the setup mentioned above with just 1 QueueWorker.
 -- But immediately hand off messages from nextFromQueue to worker threads (this library does not help you create worker threads)
-createWorker :: DBRunner -> IO QueueWorker
+createWorker :: (MonadIO m, Applicative m) => Action m QueueWorker
 createWorker = mkWorker def
 
 -- | create an worker with non-default configuration
-mkWorker :: WorkerOpts -> DBRunner -> IO QueueWorker
-mkWorker WorkerOpts {..} workerRunner = do
-    _<- workerRunner $
-      createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
-    return $ QueueWorker
-               workerRunner
-               (getCursor workerRunner workerCollection)
-               workerCollection
+mkWorker :: (MonadIO m, Applicative m) => WorkerOpts -> Action m QueueWorker
+mkWorker WorkerOpts {..} = do
+    _<- createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
+    return $ QueueWorker workerCollection
 
-getCursor :: DBRunner -> Collection -> IO Cursor
-getCursor runDB collection =
-    runDB $ do
-      _<- insert collection [ "tailableCursorFix" =: ("helps when there are no docs" :: Text) ]
-      find (select [ handled =: False ] collection) {
-          options = [TailableCursor, AwaitData, NoCursorTimeout]
-        }
+getCursor :: (MonadIO m, MonadBaseControl IO m) => QueueWorker -> Action m Cursor
+getCursor QueueWorker{..} = do
+    _<- insert qwCollection [ "tailableCursorFix" =: ("helps when there are no docs" :: Text) ]
+    find (select [ handled =: False ] qwCollection) {
+        options = [TailableCursor, AwaitData, NoCursorTimeout]
+      }
 
 
 nextDoc :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m Document
@@ -131,9 +121,9 @@ instance Exception MongoQueueException
 -- First marks the message as handled.
 --
 -- Do not call this from multiple threads against the same QueueWorker
-nextFromQueue :: QueueWorker -> IO Document
-nextFromQueue QueueWorker {..} =
-    qwGetCursor >>= qwRunDB . processNext
+nextFromQueue :: (MonadIO m, MonadBaseControl IO m) => QueueWorker -> Action m Document
+nextFromQueue qw@QueueWorker {..} =
+    getCursor qw >>= processNext
   where
     processNext cursor = do
         origDoc <- nextDoc cursor `catch` handleDroppedCursor
@@ -156,9 +146,8 @@ nextFromQueue QueueWorker {..} =
       }
 
     handleDroppedCursor :: (MonadIO m, MonadBaseControl IO m, Functor m) => SomeException -> Action m Document
-    handleDroppedCursor _ = nextDoc =<< liftIO (
-        threadDelay (1000 * 1000) >> qwGetCursor
-      )
+    handleDroppedCursor _ =
+        liftIO ( threadDelay (1000 * 1000) ) >> (getCursor qw >>= nextDoc)
 
 {-
 -- | Perform the action every time there is a new message.

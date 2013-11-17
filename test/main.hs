@@ -9,24 +9,24 @@ import Control.Concurrent
 
 
 main :: IO ()
-main = hspec $ do
+main = hspec $
   describe "MongoDB queue" $ do
     it "should handle what was emitted" $ do
-      emitter <- createEmitter runDB
-      worker <- createWorker runDB
-      emit emitter [("hello" :: Text) =: ("world" :: Text)]
+      emitter <- runDB createEmitter
+      worker <- runDB createWorker
+      runDB $ emit emitter [("hello" :: Text) =: ("world" :: Text)]
 
-      doc <- nextFromQueue worker
+      doc <- runDB $ nextFromQueue worker
       Just world <- lookup ("hello" :: Text) doc 
       world `shouldBe` ("world" :: Text)
 
     it "should wait for a document to be inserted" $ do
-      emitter <- createEmitter runDB
-      worker <- createWorker runDB
+      emitter <- runDB createEmitter
+      worker <- runDB createWorker
       forkIO $ do
         threadDelay $ 1 * 1000 * 1000 -- microseconds, 1 second
-        emit emitter [("hello" :: Text) =: ("world" :: Text)]
-      doc <- nextFromQueue worker
+        runDB $ emit emitter [("hello" :: Text) =: ("world" :: Text)]
+      doc <- runDB $ nextFromQueue worker
       Just world <- lookup ("hello" :: Text) doc 
       world `shouldBe` ("world" :: Text)
       return ()
