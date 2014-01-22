@@ -2,14 +2,17 @@
 {-# OPTIONS_GHC -fno-warn-type-defaults #-}
 module Database.MongoDB.Queue (
     emit
-  , nextFromQueue
+  , nextFromQueuePoll, nextFromQueueTail
+  -- * queue emitters
   , createEmitter, mkEmitter, EmitterOpts (..)
-  , createWorker, mkWorker, WorkerOpts (..)
+  -- * queue consumers
+  , createPollBroker, createTailBroker, mkTailBroker, mkPollBroker, WorkerOpts (..)
 
 ) where
 
 import Prelude hiding (lookup)
 import Control.Concurrent (threadDelay)
+import Data.IORef (atomicWriteIORef, IORef, newIORef, readIORef)
 import Control.Exception.Lifted (catch, throwIO, Exception, SomeException)
 import Data.Default (Default (..))
 import Data.Typeable (Typeable)
@@ -74,44 +77,63 @@ emit QueueEmitter {..} doc =
           -- globalTime: new Date(dt-self.serverTimeOffset),
           -- pickedTime: new Date(dt-self.serverTimeOffset),
 
-data QueueWorker = QueueWorker { qwCollection :: Collection }
+-- | A worker that uses a tailable cursor
+data TailBroker = TailBroker { tbCollection :: Collection  }
+
+-- | A worker that uses polling
+data PollBroker = PollBroker
+                    { pbCollection :: Collection 
+                    , pbPollInterval :: Int
+                    , pbLastId :: IORef ObjectId
+                    }
+
+
 data WorkerOpts = WorkerOpts
                   { workerMaxByteSize :: Int
                   , workerCollection :: Collection
                   }
+
 instance Default WorkerOpts where
     def = WorkerOpts 100000 queueCollection
 
--- | creates a QueueWorker
--- create a single QueueWorker per process (per queue collection)
--- call nextFromQueue with the QueueWorker to get the next message
+-- | creates a TailBroker
+-- create a single TailBroker per process (per queue collection)
+-- call nextFromQueueTail with the TailBroker to get the next message
 --
--- QueueWorker is probably poorly named now with the direction the library has taken.
--- To handle multiple messages at once use the setup mentioned above with just 1 QueueWorker.
--- But immediately hand off messages from nextFromQueue to worker threads (this library does not help you create worker threads)
-createWorker :: (MonadIO m, Applicative m) => Action m QueueWorker
-createWorker = mkWorker def
+-- TailBroker is designed to have 1 instance per process (and 1 process per machine)
+-- To handle multiple messages at once immediately hand off messages from nextFromQueueTail to worker threads (this library does not help you create worker threads)
+createTailBroker :: (MonadIO m, Applicative m) => Action m TailBroker
+createTailBroker = mkTailBroker def
+
+-- | same as createTailBroker, but uses a polling technique instead of tailable cursors
+createPollBroker :: (MonadIO m, Applicative m) => Action m PollBroker
+createPollBroker = mkPollBroker def 100
+
+-- | create a tailable cursor worker with non-default configuration
+mkTailBroker :: (MonadIO m, Applicative m) => WorkerOpts -> Action m TailBroker
+mkTailBroker WorkerOpts {..} = do
+    _<- createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
+    _ <- insert workerCollection [ "tailableCursorFix" =: ("helps when there are no docs" :: Text) ]
+    return TailBroker { tbCollection = workerCollection }
 
 -- | create an worker with non-default configuration
-mkWorker :: (MonadIO m, Applicative m) => WorkerOpts -> Action m QueueWorker
-mkWorker WorkerOpts {..} = do
+mkPollBroker :: (MonadIO m, Applicative m)
+             => WorkerOpts
+             -> Int -- ^ polling interval in us (uses threadDelay)
+             -> Action m PollBroker
+mkPollBroker WorkerOpts {..} interval = do
     _<- createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
-    return $ QueueWorker workerCollection
+    (ObjId insertId) <- insert workerCollection [
+        "tailableCursorFix" =: ("helps when there are no docs" :: Text)
+      ]
+    lastId <- liftIO $ newIORef insertId
+    return PollBroker
+               { pbCollection = workerCollection
+               , pbPollInterval = interval
+               , pbLastId = lastId
+               }
 
-getCursor :: (MonadIO m, MonadBaseControl IO m) => QueueWorker -> Action m Cursor
-getCursor QueueWorker{..} = do
-    _<- insert qwCollection [ "tailableCursorFix" =: ("helps when there are no docs" :: Text) ]
-    find (select [ handled =: False ] qwCollection) {
-        options = [TailableCursor, AwaitData, NoCursorTimeout]
-      }
 
-
-nextDoc :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m Document
-nextDoc cursor = do
-  n <- next cursor
-  case n of
-    Nothing -> nextDoc cursor
-    (Just doc) -> return doc
 
 data MongoQueueException = FindAndModifyError String
                          deriving (Show, Typeable)
@@ -120,19 +142,56 @@ instance Exception MongoQueueException
 -- | Get the next message from the queue.
 -- First marks the message as handled.
 --
--- Do not call this from multiple threads against the same QueueWorker
-nextFromQueue :: (MonadIO m, MonadBaseControl IO m) => QueueWorker -> Action m Document
-nextFromQueue qw@QueueWorker {..} =
-    getCursor qw >>= processNext
+-- Uses polling rather than a tailable cursor
+--
+-- Do not call this from multiple threads against the same PollBroker
+nextFromQueuePoll :: (MonadIO m, MonadBaseControl IO m) => PollBroker -> Action m Document
+nextFromQueuePoll pb = nextFromQueue (pbCollection pb) getCursor (nextDocPoll getCursor) $
+    \doc -> atomicWriteIORef (pbLastId pb) (at _id doc)
+  where
+    getCursor = getCursorPoll pb
+
+    getCursorPoll :: (MonadIO m, MonadBaseControl IO m) => PollBroker -> Action m Cursor
+    getCursorPoll PollBroker{..} = do
+        lastId <- liftIO $ readIORef pbLastId
+        find (select [ handled =: False, _id =: ["$gt" =: lastId ] ] pbCollection)
+
+
+
+-- | Get the next message from the queue.
+-- First marks the message as handled.
+--
+-- Uses a tailable cursor rather than polling
+--
+-- Do not call this from multiple threads against the same TailBroker
+nextFromQueueTail :: (MonadIO m, MonadBaseControl IO m) => TailBroker -> Action m Document
+nextFromQueueTail tb = nextFromQueue (tbCollection tb) (getCursorTail tb) nextDocTail (const (return ()))
+  where
+    getCursorTail :: (MonadIO m, MonadBaseControl IO m) => TailBroker -> Action m Cursor
+    getCursorTail TailBroker{..} =
+        find (select [ handled =: False ] tbCollection) {
+            options = [TailableCursor, AwaitData, NoCursorTimeout]
+          }
+
+nextFromQueue :: (MonadIO m, MonadBaseControl IO m)
+              => Collection
+              -> Action m Cursor
+              -> (Cursor -> Action m Document)
+              -> (Document -> IO ())
+              -> Action m Document
+nextFromQueue collection getCursor nextDoc successCb =
+    getCursor >>= processNext
   where
     processNext cursor = do
-        origDoc <- nextDoc cursor `catch` handleDroppedCursor
+        origDoc <- nextDoc cursor `catch` handleDroppedCursor getCursor nextDoc
         let idQuery = [_id := valueAt _id origDoc]
 
         eDoc <- findAndModify (selectQuery $ idQuery ++ [handled =: False])
                              ["$set" =: [handled =: True]]
         case eDoc of
-          Right doc -> return (at dataField doc)
+          Right doc -> do
+              liftIO $ successCb doc
+              return (at dataField doc)
           Left err  ->  do
               -- a different cursor can lock this first by setting handled to True
               -- verify that this is what happened
@@ -141,21 +200,38 @@ nextFromQueue qw@QueueWorker {..} =
                 Nothing  -> liftIO $ throwIO $ FindAndModifyError err
                 Just _ -> processNext cursor
 
-    selectQuery query = (select query qwCollection) {
+    selectQuery query = (select query collection) {
         sort = ["$natural" =: -1]
       }
 
-    handleDroppedCursor :: (MonadIO m, MonadBaseControl IO m, Functor m) => SomeException -> Action m Document
-    handleDroppedCursor _ =
-        liftIO ( threadDelay (1000 * 1000) ) >> (getCursor qw >>= nextDoc)
+handleDroppedCursor :: (MonadIO m, MonadBaseControl IO m, Functor m) => Action m Cursor -> (Cursor -> Action m Document) -> SomeException -> Action m Document
+handleDroppedCursor getCursor nextDoc _ = do
+    liftIO ( threadDelay (1000 * 1000) ) >> (getCursor >>= nextDoc)
+
+nextDocTail :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m Document
+nextDocTail cursor = do
+  n <- next cursor
+  case n of
+    Nothing -> nextDocTail cursor
+    (Just doc) -> return doc
+
+nextDocPoll :: (MonadIO m, MonadBaseControl IO m, Functor m) => Action m Cursor -> Cursor -> Action m Document
+nextDocPoll getCursor cursor = do
+    n <- next cursor
+    case n of
+        Nothing -> do
+            liftIO $ threadDelay (1000 * 100) -- 100 ms
+            getCursor >>= nextDocPoll getCursor
+        (Just doc) -> return doc
+
 
 {-
 -- | Perform the action every time there is a new message.
 -- And then marks the message as handled.
 -- Does not call ForkIO, blocks the program
 --
--- Do not call this multiple times against the same QueueWorker
-work :: QueueWorker -> (Document -> Action IO ()) -> IO ()
+-- Do not call this multiple times against the same TailBroker
+work :: TailBroker -> (Document -> Action IO ()) -> IO ()
 work qw handler = loop
   where
     loop = do

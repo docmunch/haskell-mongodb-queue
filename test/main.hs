@@ -12,21 +12,30 @@ main :: IO ()
 main = hspec $
   describe "MongoDB queue" $ do
     it "should handle what was emitted" $ do
-      emitter <- runDB createEmitter
-      worker <- runDB createWorker
-      runDB $ emit emitter [("hello" :: Text) =: ("world" :: Text)]
+      let helloWorld createWorker getNext = do
+              doc <- runDB $ do
+                  emitter <- createEmitter
+                  worker <- createWorker
+                  emit emitter [("hello" :: Text) =: ("world" :: Text)]
+                  getNext worker
 
-      doc <- runDB $ nextFromQueue worker
-      Just world <- lookup ("hello" :: Text) doc 
-      world `shouldBe` ("world" :: Text)
+              Just world <- lookup ("hello" :: Text) doc 
+              world `shouldBe` ("world" :: Text)
+
+      helloWorld createTailBroker nextFromQueueTail
+      helloWorld createPollBroker nextFromQueuePoll
+
 
     it "should wait for a document to be inserted" $ do
-      emitter <- runDB createEmitter
-      worker <- runDB createWorker
-      forkIO $ do
-        threadDelay $ 1 * 1000 * 1000 -- microseconds, 1 second
-        runDB $ emit emitter [("hello" :: Text) =: ("world" :: Text)]
-      doc <- runDB $ nextFromQueue worker
-      Just world <- lookup ("hello" :: Text) doc 
-      world `shouldBe` ("world" :: Text)
-      return ()
+      let waitForInsertion createWorker getNext = do
+              emitter <- runDB createEmitter
+              worker <- runDB createWorker
+              forkIO $ do
+                threadDelay $ 1 * 1000 * 1000 -- microseconds, 1 second
+                runDB $ emit emitter [("hello" :: Text) =: ("world" :: Text)]
+              doc <- runDB $ getNext worker
+              Just world <- lookup ("hello" :: Text) doc 
+              world `shouldBe` ("world" :: Text)
+
+      waitForInsertion createTailBroker nextFromQueueTail
+      waitForInsertion createPollBroker nextFromQueuePoll
