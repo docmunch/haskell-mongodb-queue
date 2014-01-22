@@ -1,5 +1,5 @@
 name:                mongodb-queue
-version:             0.4
+version:             0.4.0.1
 synopsis:            message queue using MongoDB
 description:         A simple messaging queue using MongoDB. This trades having a good queue for ease of deployment. This is designed to be much worse at scale than real queueing infrastructure. However, it is very simple to start using if you are already running MongoDB. You could probably fork this code to make it work with a different database that you are already using.
                      .

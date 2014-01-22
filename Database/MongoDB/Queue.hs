@@ -106,8 +106,9 @@ createTailBroker :: (MonadIO m, Applicative m) => Action m TailBroker
 createTailBroker = mkTailBroker def
 
 -- | same as createTailBroker, but uses a polling technique instead of tailable cursors
+-- Use default settings and poll with a 10 ms delay
 createPollBroker :: (MonadIO m, Applicative m) => Action m PollBroker
-createPollBroker = mkPollBroker def 100
+createPollBroker = mkPollBroker def (10 * 10000)
 
 -- | create a tailable cursor worker with non-default configuration
 mkTailBroker :: (MonadIO m, Applicative m) => WorkerOpts -> Action m TailBroker
