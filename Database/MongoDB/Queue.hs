@@ -113,7 +113,7 @@ createPollBroker = mkPollBroker def (10 * 10000)
 -- | create a tailable cursor worker with non-default configuration
 mkTailBroker :: (MonadIO m, Applicative m) => WorkerOpts -> Action m TailBroker
 mkTailBroker WorkerOpts {..} = do
-    _<- createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
+    _ <- createCollection [Capped, MaxByteSize workerMaxByteSize] workerCollection
     _ <- insert workerCollection [ "tailableCursorFix" =: ("helps when there are no docs" :: Text) ]
     return TailBroker { tbCollection = workerCollection }
 
