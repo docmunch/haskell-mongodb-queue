@@ -4,9 +4,9 @@ module Database.MongoDB.Queue (
     emit
   , nextFromQueuePoll, nextFromQueueTail
   -- * queue emitters
-  , createEmitter, mkEmitter, EmitterOpts (..)
+  , createEmitter, mkEmitter, QueueEmitter, EmitterOpts (..)
   -- * queue consumers
-  , createPollBroker, createTailBroker, mkTailBroker, mkPollBroker, WorkerOpts (..)
+  , createPollBroker, createTailBroker, mkTailBroker, mkPollBroker, PollBroker, TailBroker, WorkerOpts (..)
 
 ) where
 
