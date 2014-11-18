@@ -206,8 +206,8 @@ nextFromQueue collection getCursor nextDoc successCb =
       }
 
 handleDroppedCursor :: (MonadIO m, MonadBaseControl IO m, Functor m) => Action m Cursor -> (Cursor -> Action m Document) -> SomeException -> Action m Document
-handleDroppedCursor getCursor nextDoc _ = do
-    liftIO ( threadDelay (1000 * 1000) ) >> (getCursor >>= nextDoc)
+handleDroppedCursor getCursor getNext _ =
+    liftIO ( threadDelay (1000 * 1000) ) >> (getCursor >>= getNext)
 
 nextDocTail :: (MonadIO m, MonadBaseControl IO m, Functor m) => Cursor -> Action m Document
 nextDocTail cursor = do
